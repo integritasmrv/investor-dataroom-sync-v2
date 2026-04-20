@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     volumes:
       - ./data:/data
+    env_file:
+      - .env
     environment:
       - MAYAN_URL=http://mayan-app:8000
       - MAYAN_USER=${MAYAN_USER:-admin}
@@ -14,10 +16,12 @@ services:
       - DOCUSEAL_SECRET=${DOCUSEAL_SECRET}
     networks:
       - coolify
+    ports:
+      - "8002:8000"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.dataroom-sync.rule=Host(`sync.integritasmrv.com`)"
-      - "traefik.http.routers.dataroom-sync.entrypoints=websecure"
+      - "traefik.http.routers.dataroom-sync.entrypoints=https"
       - "traefik.http.routers.dataroom-sync.tls=true"
       - "traefik.http.services.dataroom-sync.loadbalancer.server.port=8000"
 
