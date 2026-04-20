@@ -44,23 +44,23 @@ def log_event(event: str, details: str):
     conn.close()
 
 @app.on_event("startup")
-def startup():
+async def startup():
     init_db()
 
 @app.get("/health")
-def health():
+async def health():
     return {"status": "healthy", "service": "dataroom-sync", "version": "2.1"}
 
 @app.get("/api/mayan/list")
-def list_mayan_documents():
+async def list_mayan_documents():
     resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/", timeout=30)
     resp.raise_for_status()
     docs = resp.json().get("results", [])
     return {"documents": [{"id": d.get("id"), "label": d.get("label")} for d in docs]}
 
 @app.post("/api/publish")
-def publish(request: Request):
-    data = request.json()
+async def publish(request: Request):
+    data = await request.json()
     document_id = data.get("document_id")
     version = data.get("version", "latest")
     deal_room = data.get("deal_room", "general-investors")
@@ -83,6 +83,7 @@ def publish(request: Request):
 
         resp = httpx.get(f"{MAYAN_URL}/media/documents/{document_id}/", timeout=60)
         file_content = resp.content if resp.status_code == 200 else b"placeholder"
+
 
         pydio_resp = httpx.post(f"{PYDIO_URL}/a/fs/move",
                                  headers={"Authorization": f"Bearer {PYDIO_TOKEN}"},
@@ -108,12 +109,12 @@ def publish(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/docuseal/webhook")
-def docuseal_webhook(request: Request):
+async def docuseal_webhook(request: Request):
     signature = request.headers.get("X-Docuseal-Signature", "")
     if signature != DOCUSEAL_SECRET:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
-    data = request.json()
+    data = await request.json()
     event_type = data.get("event_type")
 
     if event_type != "form.completed":
@@ -150,11 +151,13 @@ def docuseal_webhook(request: Request):
     except Exception as e:
         log_event("access_grant_failed", str(e))
 
+
     return {"status": "processed", "email": email}
 
+
 @app.post("/api/mayan/webhook")
-def mayan_webhook(request: Request):
-    data = request.json()
+async def mayan_webhook(request: Request):
+    data = await request.json()
     document_id = str(data.get("document_id", ""))
     event = data.get("event", "")
     log_event("mayan_webhook", f"doc_id={document_id}, event={event}")
@@ -163,7 +166,7 @@ def mayan_webhook(request: Request):
     return {"status": "ignored"}
 
 @app.get("/api/status/{email}")
-def investor_status(email: str):
+async def investor_status(email: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.execute("SELECT * FROM investors WHERE email=?", (email,))
     row = cursor.fetchone()
@@ -172,8 +175,9 @@ def investor_status(email: str):
         raise HTTPException(status_code=404, detail="Investor not found")
     return {"email": row[0], "deal_room": row[1], "nda_signed_at": row[2], "pydio_access_granted": bool(row[3])}
 
+
 @app.get("/api/documents/{deal_room}")
-def list_documents(deal_room: str):
+async def list_documents(deal_room: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.execute("SELECT mayan_id, version, pydio_path, published_at FROM published WHERE deal_room=?", (deal_room,))
     rows = cursor.fetchall()
