@@ -1,11 +1,10 @@
-import os, asyncio
+import os
 import httpx
 import sqlite3
 from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
 
-app = FastAPI(title="Investor Data Room Sync Service", version="2.0")
+app = FastAPI(title="Investor Data Room Sync Service", version="2.1")
 
 MAYAN_URL = os.environ.get("MAYAN_URL", "http://mayan-app:8000")
 MAYAN_USER = os.environ.get("MAYAN_USER", "admin")
@@ -44,63 +43,24 @@ def log_event(event: str, details: str):
     conn.commit()
     conn.close()
 
-def get_mayan_documents():
-    resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/", timeout=30)
-    resp.raise_for_status()
-    return resp.json().get("results", [])
-
-def get_mayan_document_metadata(doc_id: str):
-    resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/{doc_id}/", timeout=30)
-    resp.raise_for_status()
-    return resp.json()
-
-def pydio_create_folder(path: str):
-    folder_name = path.split("/")[-1]
-    parent_path = "/".join(path.split("/")[:-1]) if "/" in path else "/"
-    payload = {"Path": parent_path, "FolderTitle": folder_name, "Recursive": "false"}
-    resp = httpx.post(f"{PYDIO_URL}/a/acl/mkdir",
-                      headers={"Authorization": f"Bearer {PYDIO_TOKEN}"},
-                      json=payload, timeout=30)
-    return resp.status_code in (200, 201, 409)
-
-def pydio_upload_file(workspace: str, folder_path: str, filename: str, content: bytes) -> bool:
-    files = {"file": (filename, content)}
-    data = {"folderPath": folder_path}
-    resp = httpx.post(f"{PYDIO_URL}/a/fs/move",
-                      headers={"Authorization": f"Bearer {PYDIO_TOKEN}"},
-                      files=files, data=data, timeout=60)
-    return resp.status_code in (200, 201)
-
-def pydio_share_file(workspace: str, file_path: str, email: str) -> str:
-    payload = {
-        "Workspace": workspace, "FilePath": file_path,
-        "ShareType": "link", "SharePolicy": {"allowExternal": False, "requireCredentials": True}
-    }
-    resp = httpx.post(f"{PYDIO_URL}/a/shares/create",
-                      headers={"Authorization": f"Bearer {PYDIO_TOKEN}"},
-                      json=payload, timeout=30)
-    if resp.status_code == 200:
-        return resp.json().get("share_url", "")
-    return ""
-
-def pydio_grant_workspace_access(email: str, workspace: str):
-    payload = {"UserEmail": email, "WorkspaceSlug": workspace}
-    resp = httpx.post(f"{PYDIO_URL}/a/acl/workspace/add-user",
-                      headers={"Authorization": f"Bearer {PYDIO_TOKEN}"},
-                      json=payload, timeout=30)
-    return resp.status_code == 200
-
 @app.on_event("startup")
-async def startup():
+def startup():
     init_db()
 
 @app.get("/health")
-async def health():
-    return {"status": "healthy", "service": "dataroom-sync", "version": "2.0"}
+def health():
+    return {"status": "healthy", "service": "dataroom-sync", "version": "2.1"}
+
+@app.get("/api/mayan/list")
+def list_mayan_documents():
+    resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/", timeout=30)
+    resp.raise_for_status()
+    docs = resp.json().get("results", [])
+    return {"documents": [{"id": d.get("id"), "label": d.get("label")} for d in docs]}
 
 @app.post("/api/publish")
-async def publish(request: Request):
-    data = await request.json()
+def publish(request: Request):
+    data = request.json()
     document_id = data.get("document_id")
     version = data.get("version", "latest")
     deal_room = data.get("deal_room", "general-investors")
@@ -111,19 +71,25 @@ async def publish(request: Request):
     log_event("publish_started", f"doc_id={document_id}, deal_room={deal_room}")
 
     try:
-        doc_meta = get_mayan_document_metadata(document_id)
+        resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/{document_id}/", timeout=30)
+        resp.raise_for_status()
+        doc_meta = resp.json()
         filename = doc_meta.get("label", f"doc_{document_id}")
         folder_path = f"/{DEAL_ROOM_MAPPING.get(deal_room, deal_room)}"
-        pydio_create_folder(folder_path)
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.get(f"{MAYAN_URL}/media/documents/{document_id}/")
-            if resp.status_code == 200:
-                file_content = resp.content
-            else:
-                file_content = b"placeholder"
+        httpx.post(f"{PYDIO_URL}/a/acl/mkdir",
+                   headers={"Authorization": f"Bearer {PYDIO_TOKEN}"},
+                   json={"Path": "/", "FolderTitle": folder_path, "Recursive": "false"}, timeout=30)
 
-        if pydio_upload_file(deal_room, folder_path, filename, file_content):
+        resp = httpx.get(f"{MAYAN_URL}/media/documents/{document_id}/", timeout=60)
+        file_content = resp.content if resp.status_code == 200 else b"placeholder"
+
+        pydio_resp = httpx.post(f"{PYDIO_URL}/a/fs/move",
+                                 headers={"Authorization": f"Bearer {PYDIO_TOKEN}"},
+                                 files={"file": (filename, file_content)},
+                                 data={"folderPath": folder_path}, timeout=60)
+
+        if pydio_resp.status_code in (200, 201):
             pydio_path = f"{folder_path}/{filename}"
             conn = sqlite3.connect(DB_PATH)
             conn.execute("""INSERT OR REPLACE INTO published
@@ -142,12 +108,12 @@ async def publish(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/docuseal/webhook")
-async def docuseal_webhook(request: Request):
+def docuseal_webhook(request: Request):
     signature = request.headers.get("X-Docuseal-Signature", "")
     if signature != DOCUSEAL_SECRET:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
-    data = await request.json()
+    data = request.json()
     event_type = data.get("event_type")
 
     if event_type != "form.completed":
@@ -173,7 +139,9 @@ async def docuseal_webhook(request: Request):
 
     workspace = deal_room.replace("_", "-")
     try:
-        pydio_grant_workspace_access(email, workspace)
+        httpx.post(f"{PYDIO_URL}/a/acl/workspace/add-user",
+                   headers={"Authorization": f"Bearer {PYDIO_TOKEN}"},
+                   json={"UserEmail": email, "WorkspaceSlug": workspace}, timeout=30)
         conn = sqlite3.connect(DB_PATH)
         conn.execute("UPDATE investors SET pydio_access_granted=1 WHERE email=?", (email,))
         conn.commit()
@@ -185,8 +153,8 @@ async def docuseal_webhook(request: Request):
     return {"status": "processed", "email": email}
 
 @app.post("/api/mayan/webhook")
-async def mayan_webhook(request: Request):
-    data = await request.json()
+def mayan_webhook(request: Request):
+    data = request.json()
     document_id = str(data.get("document_id", ""))
     event = data.get("event", "")
     log_event("mayan_webhook", f"doc_id={document_id}, event={event}")
@@ -195,7 +163,7 @@ async def mayan_webhook(request: Request):
     return {"status": "ignored"}
 
 @app.get("/api/status/{email}")
-async def investor_status(email: str):
+def investor_status(email: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.execute("SELECT * FROM investors WHERE email=?", (email,))
     row = cursor.fetchone()
@@ -205,7 +173,7 @@ async def investor_status(email: str):
     return {"email": row[0], "deal_room": row[1], "nda_signed_at": row[2], "pydio_access_granted": bool(row[3])}
 
 @app.get("/api/documents/{deal_room}")
-async def list_documents(deal_room: str):
+def list_documents(deal_room: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.execute("SELECT mayan_id, version, pydio_path, published_at FROM published WHERE deal_room=?", (deal_room,))
     rows = cursor.fetchall()
@@ -214,14 +182,6 @@ async def list_documents(deal_room: str):
         {"mayan_id": r[0], "version": r[1], "pydio_path": r[2], "published_at": r[3]}
         for r in rows
     ]}
-
-@app.get("/api/mayan/list")
-async def list_mayan_documents():
-    try:
-        docs = get_mayan_documents()
-        return {"documents": [{"id": d.get("id"), "label": d.get("label")} for d in docs]}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
