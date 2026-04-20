@@ -7,10 +7,10 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI(title="Investor Data Room Sync Service", version="2.0")
 
-MAYAN_URL = os.environ.get("MAYAN_URL", "http://144.91.126.111:8010")
+MAYAN_URL = os.environ.get("MAYAN_URL", "http://mayan-app:8000")
 MAYAN_USER = os.environ.get("MAYAN_USER", "admin")
 MAYAN_PASS = os.environ.get("MAYAN_PASS", "password")
-PYDIO_URL = os.environ.get("PYDIO_URL", "http://144.91.126.111:18081")
+PYDIO_URL = os.environ.get("PYDIO_URL", "http://pydio-cells:8080")
 PYDIO_TOKEN = os.environ.get("PYDIO_TOKEN", "token")
 DOCUSEAL_SECRET = os.environ.get("DOCUSEAL_SECRET", "secret")
 DB_PATH = "/data/sync.db"
