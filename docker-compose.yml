@@ -1,0 +1,26 @@
+services:
+  sync:
+    build: .
+    container_name: dataroom-sync
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    environment:
+      - MAYAN_URL=http://mayan-app:8000
+      - MAYAN_USER=${MAYAN_USER:-admin}
+      - MAYAN_PASS=${MAYAN_PASS}
+      - PYDIO_URL=http://pydio-cells:8080
+      - PYDIO_TOKEN=${PYDIO_TOKEN}
+      - DOCUSEAL_SECRET=${DOCUSEAL_SECRET}
+    networks:
+      - coolify
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dataroom-sync.rule=Host(`sync.integritasmrv.com`)"
+      - "traefik.http.routers.dataroom-sync.entrypoints=websecure"
+      - "traefik.http.routers.dataroom-sync.tls=true"
+      - "traefik.http.services.dataroom-sync.loadbalancer.server.port=8000"
+
+networks:
+  coolify:
+    external: true
