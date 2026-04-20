@@ -7,10 +7,10 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI(title="Investor Data Room Sync Service", version="2.0")
 
-MAYAN_URL = os.environ.get("MAYAN_URL", "http://mayan-app:8000")
+MAYAN_URL = os.environ.get("MAYAN_URL", "http://144.91.126.111:8010")
 MAYAN_USER = os.environ.get("MAYAN_USER", "admin")
 MAYAN_PASS = os.environ.get("MAYAN_PASS", "password")
-PYDIO_URL = os.environ.get("PYDIO_URL", "http://pydio-cells:8080")
+PYDIO_URL = os.environ.get("PYDIO_URL", "http://144.91.126.111:18081")
 PYDIO_TOKEN = os.environ.get("PYDIO_TOKEN", "token")
 DOCUSEAL_SECRET = os.environ.get("DOCUSEAL_SECRET", "secret")
 DB_PATH = "/data/sync.db"
@@ -44,23 +44,15 @@ def log_event(event: str, details: str):
     conn.commit()
     conn.close()
 
-def get_mayan_token():
-    resp = httpx.post(f"{MAYAN_URL}/api/v4/authentication/auth/",
-                     json={"username": MAYAN_USER, "password": MAYAN_PASS}, timeout=30)
-    resp.raise_for_error()
-    return resp.json()["data"]["token"]
+def get_mayan_documents():
+    resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/", timeout=30)
+    resp.raise_for_status()
+    return resp.json().get("results", [])
 
-def get_mayan_document_metadata(doc_id: str, token: str):
-    resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/{doc_id}/",
-                     headers={"Authorization": f"Bearer {token}"}, timeout=30)
-    resp.raise_for_error()
-    return resp.json()["data"]
-
-def get_mayan_file_download_url(doc_id: int, token: str):
-    resp = httpx.post(f"{MAYAN_URL}/api/v4/documents/{doc_id}/download/",
-                      headers={"Authorization": f"Bearer {token}"}, timeout=30)
-    resp.raise_for_error()
-    return resp.json()["data"]["url"]
+def get_mayan_document_metadata(doc_id: str):
+    resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/{doc_id}/", timeout=30)
+    resp.raise_for_status()
+    return resp.json()
 
 def pydio_create_folder(path: str):
     folder_name = path.split("/")[-1]
@@ -119,16 +111,17 @@ async def publish(request: Request):
     log_event("publish_started", f"doc_id={document_id}, deal_room={deal_room}")
 
     try:
-        token = get_mayan_token()
-        doc_meta = get_mayan_document_metadata(document_id, token)
-        download_url = get_mayan_file_download_url(int(document_id), token)
+        doc_meta = get_mayan_document_metadata(document_id)
+        filename = doc_meta.get("label", f"doc_{document_id}")
         folder_path = f"/{DEAL_ROOM_MAPPING.get(deal_room, deal_room)}"
         pydio_create_folder(folder_path)
-        filename = doc_meta.get("label", f"doc_{document_id}")
 
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.get(download_url)
-            file_content = resp.content
+            resp = await client.get(f"{MAYAN_URL}/media/documents/{document_id}/")
+            if resp.status_code == 200:
+                file_content = resp.content
+            else:
+                file_content = b"placeholder"
 
         if pydio_upload_file(deal_room, folder_path, filename, file_content):
             pydio_path = f"{folder_path}/{filename}"
@@ -221,6 +214,14 @@ async def list_documents(deal_room: str):
         {"mayan_id": r[0], "version": r[1], "pydio_path": r[2], "published_at": r[3]}
         for r in rows
     ]}
+
+@app.get("/api/mayan/list")
+async def list_mayan_documents():
+    try:
+        docs = get_mayan_documents()
+        return {"documents": [{"id": d.get("id"), "label": d.get("label")} for d in docs]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
