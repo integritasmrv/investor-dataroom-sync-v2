@@ -24,27 +24,20 @@ DEAL_ROOM_MAPPING = {
 
 def get_mayan_headers():
     if MAYAN_TOKEN:
-        return {"Authorization": f"Token {MAYAN_TOKEN}"}
+        return {"Authorization": "Token " + MAYAN_TOKEN}
     return {}
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("""CREATE TABLE IF NOT EXISTS published (
-        mayan_id TEXT, version TEXT, pydio_path TEXT, deal_room TEXT,
-        published_at TEXT, revoked_at TEXT, PRIMARY KEY (mayan_id, version)
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS investors (
-        email TEXT PRIMARY KEY, deal_room TEXT, nda_signed_at TEXT, pydio_access_granted INTEGER DEFAULT 0
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS sync_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, event TEXT, details TEXT
-    )""")
+    conn.execute("CREATE TABLE IF NOT EXISTS published (mayan_id TEXT, version TEXT, pydio_path TEXT, deal_room TEXT, published_at TEXT, revoked_at TEXT, PRIMARY KEY (mayan_id, version))")
+    conn.execute("CREATE TABLE IF NOT EXISTS investors (email TEXT PRIMARY KEY, deal_room TEXT, nda_signed_at TEXT, pydio_access_granted INTEGER DEFAULT 0)")
+    conn.execute("CREATE TABLE IF NOT EXISTS sync_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, event TEXT, details TEXT)")
     conn.commit()
     conn.close()
 
 def log_event(event: str, details: str):
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("INSERT INTO sync_log (timestamp, event, details) VALUES (?,?,?)",
+    conn.execute("INSERT INTO sync_log (timestamp, event, details) VALUES (?, ?, ?)",
                  (datetime.utcnow().isoformat(), event, details))
     conn.commit()
     conn.close()
@@ -59,7 +52,7 @@ async def health():
 
 @app.get("/api/mayan/list")
 async def list_mayan_documents():
-    resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/", headers=get_mayan_headers(), timeout=30)
+    resp = httpx.get(MAYAN_URL + "/api/v4/documents/", headers=get_mayan_headers(), timeout=30)
     resp.raise_for_status()
     docs = resp.json().get("results", [])
     return {"documents": [{"id": d.get("id"), "label": d.get("label")} for d in docs]}
@@ -74,38 +67,35 @@ async def publish(request: Request):
     if not document_id:
         raise HTTPException(status_code=400, detail="document_id required")
 
-    log_event("publish_started", f"doc_id={document_id}, deal_room={deal_room}")
+    log_event("publish_started", "doc_id=" + str(document_id) + ", deal_room=" + deal_room)
 
     try:
-        resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/{document_id}/", headers=get_mayan_headers(), timeout=30)
+        resp = httpx.get(MAYAN_URL + "/api/v4/documents/" + str(document_id) + "/", headers=get_mayan_headers(), timeout=30)
         resp.raise_for_status()
         doc_meta = resp.json()
-        filename = doc_meta.get("label", f"doc_{document_id}")
-        folder_path = f"/{DEAL_ROOM_MAPPING.get(deal_room, deal_room)}"
+        filename = doc_meta.get("label", "doc_" + str(document_id))
+        folder_path = "/" + DEAL_ROOM_MAPPING.get(deal_room, deal_room)
 
-        httpx.post(f"{PYDIO_URL}/a/acl/mkdir",
-                   headers={"Authorization": f"Bearer {PYDIO_TOKEN}"},
+        httpx.post(PYDIO_URL + "/a/acl/mkdir",
+                   headers={"Authorization": "Bearer " + PYDIO_TOKEN},
                    json={"Path": "/", "FolderTitle": folder_path, "Recursive": "false"}, timeout=30)
 
-
-        resp = httpx.get(f"{MAYAN_URL}/media/documents/{document_id}/", headers=get_mayan_headers(), timeout=60)
+        resp = httpx.get(MAYAN_URL + "/media/documents/" + str(document_id) + "/", headers=get_mayan_headers(), timeout=60)
         file_content = resp.content if resp.status_code == 200 else b"placeholder"
 
-        pydio_resp = httpx.post(f"{PYDIO_URL}/a/fs/move",
-                                 headers={"Authorization": f"Bearer {PYDIO_TOKEN}"},
+        pydio_resp = httpx.post(PYDIO_URL + "/a/fs/move",
+                                 headers={"Authorization": "Bearer " + PYDIO_TOKEN},
                                  files={"file": (filename, file_content)},
                                  data={"folderPath": folder_path}, timeout=60)
 
         if pydio_resp.status_code in (200, 201):
-            pydio_path = f"{folder_path}/{filename}"
+            pydio_path = folder_path + "/" + filename
             conn = sqlite3.connect(DB_PATH)
-            conn.execute(""""INSERT OR REPLACE INTO published
-                           (mayan_id, version, pydio_path, deal_room, published_at)
-                           VALUES (?,?,?,?,?)""",
-                         (document_id, version, pydio_path, deal_room, datetime.utcnow().isoformat()))
+            conn.execute("INSERT OR REPLACE INTO published (mayan_id, version, pydio_path, deal_room, published_at) VALUES (?, ?, ?, ?, ?)",
+                         (str(document_id), version, pydio_path, deal_room, datetime.utcnow().isoformat()))
             conn.commit()
             conn.close()
-            log_event("publish_completed", f"pydio_path={pydio_path}")
+            log_event("publish_completed", "pydio_path=" + pydio_path)
             return {"status": "published", "pydio_path": pydio_path, "document_id": document_id}
 
         raise HTTPException(status_code=500, detail="Failed to upload to Pydio")
@@ -130,29 +120,28 @@ async def docuseal_webhook(request: Request):
     email = form_data.get("submitters", [{}])[0].get("email", "")
     form_id = form_data.get("form_id", "")
     deal_room = form_data.get("external_id", "series-a")
+
     if not email:
         raise HTTPException(status_code=400, detail="No email found")
 
-    log_event("nda_signed", f"email={email}, form_id={form_id}")
+    log_event("nda_signed", "email=" + email + ", form_id=" + str(form_id))
 
     conn = sqlite3.connect(DB_PATH)
-    conn.execute(""""INSERT OR REPLACE INTO investors
-                   (email, deal_room, nda_signed_at, pydio_access_granted)
-                   VALUES (?,?,?,0)""",
+    conn.execute("INSERT OR REPLACE INTO investors (email, deal_room, nda_signed_at, pydio_access_granted) VALUES (?, ?, ?, 0)",
                  (email, deal_room, datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
 
     workspace = deal_room.replace("_", "-")
     try:
-        httpx.post(f"{PYDIO_URL}/a/acl/workspace/add-user",
-                   headers={"Authorization": f"Bearer {PYDIO_TOKEN}"},
+        httpx.post(PYDIO_URL + "/a/acl/workspace/add-user",
+                   headers={"Authorization": "Bearer " + PYDIO_TOKEN},
                    json={"UserEmail": email, "WorkspaceSlug": workspace}, timeout=30)
         conn = sqlite3.connect(DB_PATH)
         conn.execute("UPDATE investors SET pydio_access_granted=1 WHERE email=?", (email,))
         conn.commit()
         conn.close()
-        log_event("access_granted", f"email={email}, workspace={workspace}")
+        log_event("access_granted", "email=" + email + ", workspace=" + workspace)
     except Exception as e:
         log_event("access_grant_failed", str(e))
 
@@ -163,7 +152,7 @@ async def mayan_webhook(request: Request):
     data = await request.json()
     document_id = str(data.get("document_id", ""))
     event = data.get("event", "")
-    log_event("mayan_webhook", f"doc_id={document_id}, event={event}")
+    log_event("mayan_webhook", "doc_id=" + document_id + ", event=" + event)
     if event in ("document_created", "document_updated"):
         return {"status": "queued", "document_id": document_id}
     return {"status": "ignored"}
