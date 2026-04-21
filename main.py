@@ -9,6 +9,7 @@ app = FastAPI(title="Investor Data Room Sync Service", version="2.1")
 MAYAN_URL = os.environ.get("MAYAN_URL", "http://mayan-app:8000")
 MAYAN_USER = os.environ.get("MAYAN_USER", "admin")
 MAYAN_PASS = os.environ.get("MAYAN_PASS", "password")
+MAYAN_TOKEN = os.environ.get("MAYAN_TOKEN", "")
 PYDIO_URL = os.environ.get("PYDIO_URL", "http://pydio-cells:8080")
 PYDIO_TOKEN = os.environ.get("PYDIO_TOKEN", "token")
 DOCUSEAL_SECRET = os.environ.get("DOCUSEAL_SECRET", "secret")
@@ -20,6 +21,11 @@ DEAL_ROOM_MAPPING = {
     "board-only": "Board Materials",
     "general-investors": "General Investor Materials"
 }
+
+def get_mayan_headers():
+    if MAYAN_TOKEN:
+        return {"Authorization": f"Token {MAYAN_TOKEN}"}
+    return {}
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -53,7 +59,7 @@ async def health():
 
 @app.get("/api/mayan/list")
 async def list_mayan_documents():
-    resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/", timeout=30)
+    resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/", headers=get_mayan_headers(), timeout=30)
     resp.raise_for_status()
     docs = resp.json().get("results", [])
     return {"documents": [{"id": d.get("id"), "label": d.get("label")} for d in docs]}
@@ -71,7 +77,7 @@ async def publish(request: Request):
     log_event("publish_started", f"doc_id={document_id}, deal_room={deal_room}")
 
     try:
-        resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/{document_id}/", timeout=30)
+        resp = httpx.get(f"{MAYAN_URL}/api/v4/documents/{document_id}/", headers=get_mayan_headers(), timeout=30)
         resp.raise_for_status()
         doc_meta = resp.json()
         filename = doc_meta.get("label", f"doc_{document_id}")
@@ -81,9 +87,9 @@ async def publish(request: Request):
                    headers={"Authorization": f"Bearer {PYDIO_TOKEN}"},
                    json={"Path": "/", "FolderTitle": folder_path, "Recursive": "false"}, timeout=30)
 
-        resp = httpx.get(f"{MAYAN_URL}/media/documents/{document_id}/", timeout=60)
-        file_content = resp.content if resp.status_code == 200 else b"placeholder"
 
+        resp = httpx.get(f"{MAYAN_URL}/media/documents/{document_id}/", headers=get_mayan_headers(), timeout=60)
+        file_content = resp.content if resp.status_code == 200 else b"placeholder"
 
         pydio_resp = httpx.post(f"{PYDIO_URL}/a/fs/move",
                                  headers={"Authorization": f"Bearer {PYDIO_TOKEN}"},
@@ -93,10 +99,10 @@ async def publish(request: Request):
         if pydio_resp.status_code in (200, 201):
             pydio_path = f"{folder_path}/{filename}"
             conn = sqlite3.connect(DB_PATH)
-            conn.execute("""INSERT OR REPLACE INTO published
+            conn.execute(""""INSERT OR REPLACE INTO published
                            (mayan_id, version, pydio_path, deal_room, published_at)
                            VALUES (?,?,?,?,?)""",
-                        (document_id, version, pydio_path, deal_room, datetime.utcnow().isoformat()))
+                         (document_id, version, pydio_path, deal_room, datetime.utcnow().isoformat()))
             conn.commit()
             conn.close()
             log_event("publish_completed", f"pydio_path={pydio_path}")
@@ -124,17 +130,16 @@ async def docuseal_webhook(request: Request):
     email = form_data.get("submitters", [{}])[0].get("email", "")
     form_id = form_data.get("form_id", "")
     deal_room = form_data.get("external_id", "series-a")
-
     if not email:
         raise HTTPException(status_code=400, detail="No email found")
 
     log_event("nda_signed", f"email={email}, form_id={form_id}")
 
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("""INSERT OR REPLACE INTO investors
+    conn.execute(""""INSERT OR REPLACE INTO investors
                    (email, deal_room, nda_signed_at, pydio_access_granted)
                    VALUES (?,?,?,0)""",
-                (email, deal_room, datetime.utcnow().isoformat()))
+                 (email, deal_room, datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
 
@@ -151,9 +156,7 @@ async def docuseal_webhook(request: Request):
     except Exception as e:
         log_event("access_grant_failed", str(e))
 
-
     return {"status": "processed", "email": email}
-
 
 @app.post("/api/mayan/webhook")
 async def mayan_webhook(request: Request):
@@ -174,7 +177,6 @@ async def investor_status(email: str):
     if not row:
         raise HTTPException(status_code=404, detail="Investor not found")
     return {"email": row[0], "deal_room": row[1], "nda_signed_at": row[2], "pydio_access_granted": bool(row[3])}
-
 
 @app.get("/api/documents/{deal_room}")
 async def list_documents(deal_room: str):
